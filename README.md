@@ -1,6 +1,8 @@
 # VM to use as a jumphost/portal into Lab environment
 
-This repo will contain the build instructions for a VM that will act as a jumphost to the rest of the RHHI lab environment. For a quick deployment the VM will be exported as an OVA and stored on a separate storage server (in this case, a Synology DS918+) to allow for quick imports into newly deployed labs.
+This repo will contain the build instructions for a VM that will act as a jumphost to the rest of the RHHI lab environment. The jumphost purpose will be for both SSH access as well as noVNC access to a desktop environment.
+
+For a quick deployment the VM will be exported as an OVA and stored on a separate storage server (in this case, a Synology DS918+) to allow for quick imports into newly deployed labs.
 
 The intent is to have a locked down VM for external users to be able to access, so long as their user exists within the IdM database. Access will be through either:
 - SSH key access (stored in the IdM database)
@@ -18,8 +20,14 @@ We're going to start with Fedora 30 WS as the initial distro used, but will even
   - /var/log        6144  MiB
   - /var/log/audit  2048  MiB
   - /tmp            2048  MiB
-  - /root           12288 MiB
+  - /               12288 MiB
   - /home           20480 MiB
   - swap            1024  MiB
 - Run Once: boot option attach ISO, change boot order, check box rollback config
--
+- change root password (sudo passwd root)
+- Install:
+  - ipa-client, ansible
+- ipa-client-install -U --mkhomedir -p {{idm_register_username}} -w {{idm_register_password}}
+- Change Gnome to start desktop on Gnome classic by default
+- Start:
+  - sshd

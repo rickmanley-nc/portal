@@ -1,0 +1,157 @@
+# Author: John Call <johnsimcall@gmail.com>
+---
+- hosts: localhost
+  connection: local
+  become: true
+  gather_facts: yes
+  vars:
+    vnc_user: portal-user1
+    vnc_passwd: RedHat1!
+    vnc_display: 1
+    novnc_listen: 80
+
+  tasks:
+  - assert:
+      that:
+        - "vnc_user != 'root'"
+      msg: "Refusing to setup VNC for root user"
+
+  - user:
+      name: "{{ vnc_user }}"
+      password: "!!"
+      update_password: on_create
+
+  - lineinfile:
+      path: /etc/xdg/autostart/gnome-initial-setup-first-login.desktop
+      line: X-GNOME-Autostart-enabled=false
+      insertafter: EOF
+
+  - name: Install TigerVNC server
+    package:
+      name: tigervnc-server
+      state: present
+
+  - name: Create VNC password file
+    getent:
+      database: passwd
+      key: "{{ vnc_user }}"
+  - set_fact:
+      vnc_path: "{{ getent_passwd[vnc_user][4] }}/.vnc"
+  - file:
+      path: "{{ vnc_path }}"
+      state: directory
+      owner: "{{ vnc_user }}"
+      group: "{{ vnc_user }}"
+      mode: 0700
+  - copy:
+      content: ""
+      dest: "{{ vnc_path }}/passwd"
+      owner: "{{ vnc_user }}"
+      group: "{{ vnc_user }}"
+      mode: 0600
+  - shell: echo -n {{ vnc_passwd }} | vncpasswd -f > {{ vnc_path }}/passwd
+    become_user: "{{ vnc_user }}"
+
+  - name: Deploy systemd unit file - vncserver@:{{ vnc_display }}
+    copy:
+      src: /lib/systemd/system/vncserver@.service
+      dest: /etc/systemd/system/vncserver@:{{ vnc_display }}.service
+  - replace:
+      path: /etc/systemd/system/vncserver@:{{ vnc_display }}.service
+      regexp: "<USER>"
+      replace: "{{ vnc_user }}"
+      after: "Replace <USER>"
+  - name: Hack for PIDFile bug - https://github.com/TigerVNC/tigervnc/issues/606
+    lineinfile:
+      dest: /etc/systemd/system/vncserver@:{{ vnc_display }}.service
+      state: absent
+      regexp: '^PIDFile'
+    when: ansible_distribution == "Fedora"
+  - name: Hack for black/blank screen (missing Environment=XDG_SESSION_TYPE=x11)
+    lineinfile:
+      path: /etc/systemd/system/vncserver@:{{ vnc_display }}.service
+      line: Environment=XDG_SESSION_TYPE=x11
+      insertafter: [Service]
+    when: ansible_distribution == "Fedora"
+    tags: [test] #DOESNT WORK RIGHT
+
+  - systemd:
+      daemon_reload: yes
+      unit: vncserver@:{{ vnc_display }}
+      enabled: true
+      state: started
+
+  - name: noVNC block
+    block:
+      - name: Download noVNC and websockify
+        unarchive:
+          src: "{{ item.src }}"
+          dest: "{{ item.dest }}"
+          remote_src: yes
+        with_items:
+          - { src: 'https://github.com/novnc/noVNC/archive/v1.0.0.tar.gz', dest: '/opt' }
+          - { src: 'https://github.com/novnc/websockify/archive/v0.8.0.tar.gz', dest: '/opt/noVNC-1.0.0/utils/' }
+      - name: Create symlinks
+        file:
+          src: "{{ item.src }}"
+          dest: "{{ item.dest }}"
+          state: link
+        with_items:
+          - { src: '/opt/noVNC-1.0.0', dest: '/opt/noVNC' }
+          - { src: '/opt/noVNC/utils/websockify-0.8.0', dest: '/opt/noVNC/utils/websockify' }
+      - package:
+          name: numpy
+          state: present
+      - name: Deploy systemd unit file - novnc.service
+        copy:
+          content: |
+            [Unit]
+            Description = noVNC service
+            After=syslog.target network.target
+
+            [Service]
+            Type=simple
+            User={{ (novnc_listen|int <= 1024) | ternary('root',vnc_user) }}
+            ExecStart = /opt/noVNC/utils/launch.sh --listen {{ novnc_listen }} --vnc localhost:590{{ vnc_display }}
+
+            [Install]
+            WantedBy=multi-user.target
+          dest: /etc/systemd/system/novnc.service
+      - systemd:
+          daemon_reload: yes
+          unit: novnc.service
+          enabled: true
+          state: started
+      - firewalld:
+          port: "{{ novnc_listen }}/tcp"
+          state: enabled
+          immediate: true
+          permanent: true
+    tags: [novnc]
+    # end noVNC block
+  - name: Create index.html
+    block:
+      - copy:
+          content: |
+            <html>
+            <head>
+            <meta http-equiv="refresh" content="0; URL='./vnc.html?resize=remote&password={{ vnc_passwd }}&autoconnect=1'" />
+            </head>
+            <body>
+            </body>
+            </html>
+          dest: /opt/noVNC/index.html
+    tags: [index]
+    # end index.html block
+
+
+## Notes
+### Alternative to "vncserver" -- may be useful for laptops
+# x11vnc (yum install x11vnc) can be used to share your current X desktop.
+# x11vnc -forever -display $DISPLAY
+# x11vnc -forever -display :0
+
+### SELinux issue on Fedora (need to remove PIDFile from systemd unit file)
+# Unset PIDFile to workaround SELinux issue on Fedora
+# https://github.com/TigerVNC/tigervnc/issues/606
+# PIDFile={{ vnc_path }}/{{ vnc_user }}/.vnc/%H%i.pid
